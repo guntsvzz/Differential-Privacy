@@ -1,0 +1,824 @@
+{
+ "cells": [
+  {
+   "attachments": {},
+   "cell_type": "markdown",
+   "id": "c008eacc",
+   "metadata": {},
+   "source": [
+    "## Causal Language modeling"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "aa73cd11-cc26-4d08-9555-cef186a9e0b3",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#comment this if you are not using AIT proxy...\n",
+    "import os\n",
+    "os.environ['http_proxy']  = 'http://192.41.170.23:3128'\n",
+    "os.environ['https_proxy'] = 'http://192.41.170.23:3128'"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "493a1002-04fe-4481-b4dd-727d3a1907cf",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "cuda\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch.nn as nn\n",
+    "import torch\n",
+    "from torch.utils.data import DataLoader\n",
+    "from tqdm.auto import tqdm\n",
+    "\n",
+    "device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n",
+    "print(device)\n",
+    "\n",
+    "#make our work comparable if restarted the kernel\n",
+    "SEED = 1234\n",
+    "torch.manual_seed(SEED)\n",
+    "torch.backends.cudnn.deterministic = True"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "df147faf-a105-458a-ac8e-66d0cef47acb",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from transformers import (\n",
+    "    CONFIG_MAPPING,\n",
+    "    MODEL_MAPPING,\n",
+    "    AdamW,\n",
+    "    AutoConfig,\n",
+    "    AutoModelForCausalLM,\n",
+    "    AutoTokenizer,\n",
+    "    default_data_collator\n",
+    ")\n",
+    "from itertools import chain"
+   ]
+  },
+  {
+   "attachments": {},
+   "cell_type": "markdown",
+   "id": "b0b35bba-135c-47de-8712-c51417b74224",
+   "metadata": {},
+   "source": [
+    "## Load Dataset"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "6a9a956f-df33-420c-bc13-44e8478d2418",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "Found cached dataset wikitext (/root/.cache/huggingface/datasets/wikitext/wikitext-2-raw-v1/1.0.0/a241db52902eaf2c6aa732210bead40c090019a499ceb13bcbfa3f8ab646a126)\n"
+     ]
+    },
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "2c10f0210bba4235948823e388a15e69",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "  0%|          | 0/3 [00:00<?, ?it/s]"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/plain": [
+       "DatasetDict({\n",
+       "    test: Dataset({\n",
+       "        features: ['text'],\n",
+       "        num_rows: 4358\n",
+       "    })\n",
+       "    train: Dataset({\n",
+       "        features: ['text'],\n",
+       "        num_rows: 36718\n",
+       "    })\n",
+       "    validation: Dataset({\n",
+       "        features: ['text'],\n",
+       "        num_rows: 3760\n",
+       "    })\n",
+       "})"
+      ]
+     },
+     "execution_count": 4,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "from datasets import load_dataset\n",
+    "raw_datasets = load_dataset('wikitext', 'wikitext-2-raw-v1')\n",
+    "raw_datasets"
+   ]
+  },
+  {
+   "attachments": {},
+   "cell_type": "markdown",
+   "id": "845a686d-e318-4e91-85bb-afc92891690b",
+   "metadata": {},
+   "source": [
+    "## Tokenizer"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "a8db6ad9-2298-484e-913d-129a0dc663d1",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "model_checkpoint = \"distilgpt2\"\n",
+    "config = AutoConfig.from_pretrained(model_checkpoint)\n",
+    "model = AutoModelForCausalLM.from_config(config)\n",
+    "\n",
+    "tokenizer = AutoTokenizer.from_pretrained(model_checkpoint, use_fast=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "id": "b3ee4899-3680-4a97-ab45-b4a298d4c3de",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "GPT2LMHeadModel(\n",
+       "  (transformer): GPT2Model(\n",
+       "    (wte): Embedding(50257, 768)\n",
+       "    (wpe): Embedding(1024, 768)\n",
+       "    (drop): Dropout(p=0.1, inplace=False)\n",
+       "    (h): ModuleList(\n",
+       "      (0): GPT2Block(\n",
+       "        (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (attn): GPT2Attention(\n",
+       "          (c_attn): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (attn_dropout): Dropout(p=0.1, inplace=False)\n",
+       "          (resid_dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "        (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (mlp): GPT2MLP(\n",
+       "          (c_fc): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (act): NewGELUActivation()\n",
+       "          (dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "      )\n",
+       "      (1): GPT2Block(\n",
+       "        (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (attn): GPT2Attention(\n",
+       "          (c_attn): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (attn_dropout): Dropout(p=0.1, inplace=False)\n",
+       "          (resid_dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "        (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (mlp): GPT2MLP(\n",
+       "          (c_fc): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (act): NewGELUActivation()\n",
+       "          (dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "      )\n",
+       "      (2): GPT2Block(\n",
+       "        (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (attn): GPT2Attention(\n",
+       "          (c_attn): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (attn_dropout): Dropout(p=0.1, inplace=False)\n",
+       "          (resid_dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "        (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (mlp): GPT2MLP(\n",
+       "          (c_fc): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (act): NewGELUActivation()\n",
+       "          (dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "      )\n",
+       "      (3): GPT2Block(\n",
+       "        (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (attn): GPT2Attention(\n",
+       "          (c_attn): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (attn_dropout): Dropout(p=0.1, inplace=False)\n",
+       "          (resid_dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "        (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (mlp): GPT2MLP(\n",
+       "          (c_fc): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (act): NewGELUActivation()\n",
+       "          (dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "      )\n",
+       "      (4): GPT2Block(\n",
+       "        (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (attn): GPT2Attention(\n",
+       "          (c_attn): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (attn_dropout): Dropout(p=0.1, inplace=False)\n",
+       "          (resid_dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "        (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (mlp): GPT2MLP(\n",
+       "          (c_fc): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (act): NewGELUActivation()\n",
+       "          (dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "      )\n",
+       "      (5): GPT2Block(\n",
+       "        (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (attn): GPT2Attention(\n",
+       "          (c_attn): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (attn_dropout): Dropout(p=0.1, inplace=False)\n",
+       "          (resid_dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "        (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "        (mlp): GPT2MLP(\n",
+       "          (c_fc): Conv1D()\n",
+       "          (c_proj): Conv1D()\n",
+       "          (act): NewGELUActivation()\n",
+       "          (dropout): Dropout(p=0.1, inplace=False)\n",
+       "        )\n",
+       "      )\n",
+       "    )\n",
+       "    (ln_f): LayerNorm((768,), eps=1e-05, elementwise_affine=True)\n",
+       "  )\n",
+       "  (lm_head): Linear(in_features=768, out_features=50257, bias=False)\n",
+       ")"
+      ]
+     },
+     "execution_count": 6,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "model"
+   ]
+  },
+  {
+   "attachments": {},
+   "cell_type": "markdown",
+   "id": "4b575109-0faf-400d-888f-f69e315aa2ff",
+   "metadata": {},
+   "source": [
+    "## Preprocessing the datasets."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "3172feb4-dbf4-410f-93f3-9c17d93421d8",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "Loading cached processed dataset at /root/.cache/huggingface/datasets/wikitext/wikitext-2-raw-v1/1.0.0/a241db52902eaf2c6aa732210bead40c090019a499ceb13bcbfa3f8ab646a126/cache-37b4dc0ea103ad45.arrow\n",
+      "Loading cached processed dataset at /root/.cache/huggingface/datasets/wikitext/wikitext-2-raw-v1/1.0.0/a241db52902eaf2c6aa732210bead40c090019a499ceb13bcbfa3f8ab646a126/cache-be35e934cb30ed7e.arrow\n",
+      "Loading cached processed dataset at /root/.cache/huggingface/datasets/wikitext/wikitext-2-raw-v1/1.0.0/a241db52902eaf2c6aa732210bead40c090019a499ceb13bcbfa3f8ab646a126/cache-b51385d4e2ed1b6e.arrow\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "DatasetDict({\n",
+       "    test: Dataset({\n",
+       "        features: ['input_ids', 'attention_mask'],\n",
+       "        num_rows: 4358\n",
+       "    })\n",
+       "    train: Dataset({\n",
+       "        features: ['input_ids', 'attention_mask'],\n",
+       "        num_rows: 36718\n",
+       "    })\n",
+       "    validation: Dataset({\n",
+       "        features: ['input_ids', 'attention_mask'],\n",
+       "        num_rows: 3760\n",
+       "    })\n",
+       "})"
+      ]
+     },
+     "execution_count": 7,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# First we tokenize all the texts.\n",
+    "column_names = raw_datasets[\"train\"].column_names\n",
+    "text_column_name = \"text\" if \"text\" in column_names else column_names[0]\n",
+    "\n",
+    "def tokenize_function(examples):\n",
+    "    return tokenizer(examples[text_column_name])\n",
+    "\n",
+    "tokenized_datasets = raw_datasets.map(\n",
+    "    tokenize_function, \n",
+    "    batched=True, \n",
+    "    remove_columns=column_names\n",
+    ")\n",
+    "tokenized_datasets"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "id": "5b9685c2-09ec-44fa-8b97-32e2273f4f61",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "block_size = tokenizer.model_max_length #1024\n",
+    "# block_size = 128\n",
+    "\n",
+    "# Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.\n",
+    "def group_texts(examples):\n",
+    "    # Concatenate all texts.\n",
+    "    concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}\n",
+    "    total_length = len(concatenated_examples[list(examples.keys())[0]])\n",
+    "    # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can\n",
+    "    # customize this part to your needs.\n",
+    "    if total_length >= block_size:\n",
+    "        total_length = (total_length // block_size) * block_size\n",
+    "    # Split by chunks of max_len.\n",
+    "    result = {\n",
+    "        k: [t[i : i + block_size] for i in range(0, total_length, block_size)]\n",
+    "        for k, t in concatenated_examples.items()\n",
+    "    }\n",
+    "    result[\"labels\"] = result[\"input_ids\"].copy()\n",
+    "    return result"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "id": "b858a349-a0ed-4af1-bdf9-f99ed074c3cd",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "Loading cached processed dataset at /root/.cache/huggingface/datasets/wikitext/wikitext-2-raw-v1/1.0.0/a241db52902eaf2c6aa732210bead40c090019a499ceb13bcbfa3f8ab646a126/cache-d81af5a39afc098b.arrow\n",
+      "Loading cached processed dataset at /root/.cache/huggingface/datasets/wikitext/wikitext-2-raw-v1/1.0.0/a241db52902eaf2c6aa732210bead40c090019a499ceb13bcbfa3f8ab646a126/cache-8460203a810ac70a.arrow\n",
+      "Loading cached processed dataset at /root/.cache/huggingface/datasets/wikitext/wikitext-2-raw-v1/1.0.0/a241db52902eaf2c6aa732210bead40c090019a499ceb13bcbfa3f8ab646a126/cache-fdfc0c6a212943f5.arrow\n"
+     ]
+    }
+   ],
+   "source": [
+    "lm_datasets = tokenized_datasets.map(\n",
+    "            group_texts,\n",
+    "            batched=True,\n",
+    "            num_proc=None,\n",
+    "        )\n",
+    "\n",
+    "train_dataset = lm_datasets[\"train\"]\n",
+    "eval_dataset = lm_datasets[\"validation\"]\n",
+    "test_dataset = lm_datasets[\"test\"]"
+   ]
+  },
+  {
+   "attachments": {},
+   "cell_type": "markdown",
+   "id": "ec0ebfd5-1ff2-4b47-af44-25cf98469f5f",
+   "metadata": {},
+   "source": [
+    "## Dataloader"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "id": "d6b99c12-56b2-4d5c-88f5-a96eb183c426",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "BATCH_SIZE = 2\n",
+    "\n",
+    "train_dataloader = DataLoader(\n",
+    "    train_dataset,\n",
+    "    shuffle=True,\n",
+    "    collate_fn=default_data_collator,\n",
+    "    batch_size=BATCH_SIZE,\n",
+    ")\n",
+    "eval_dataloader = DataLoader(\n",
+    "    eval_dataset,\n",
+    "    collate_fn=default_data_collator,\n",
+    "    batch_size=BATCH_SIZE,\n",
+    ")\n",
+    "test_dataloader = DataLoader(\n",
+    "    test_dataset,\n",
+    "    collate_fn=default_data_collator,\n",
+    "    batch_size=BATCH_SIZE,\n",
+    ")"
+   ]
+  },
+  {
+   "attachments": {},
+   "cell_type": "markdown",
+   "id": "f9591c56-e348-4358-a652-2ce18be049e3",
+   "metadata": {},
+   "source": [
+    "## Optimizer"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "id": "3ca0d477-33cd-46b8-9b74-1c3e297e12c9",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "/usr/local/lib/python3.8/dist-packages/transformers/optimization.py:306: FutureWarning: This implementation of AdamW is deprecated and will be removed in a future version. Use the PyTorch implementation torch.optim.AdamW instead, or set `no_deprecation_warning=True` to disable this warning\n",
+      "  warnings.warn(\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Split weights in two groups, one with weight decay and the other not.\n",
+    "no_decay = [\"bias\", \"LayerNorm.weight\"]\n",
+    "optimizer_grouped_parameters = [\n",
+    "    {\n",
+    "        \"params\": [\n",
+    "            p\n",
+    "            for n, p in model.named_parameters()\n",
+    "            if not any(nd in n for nd in no_decay)\n",
+    "        ],\n",
+    "        \"weight_decay\": 0.01,\n",
+    "    },\n",
+    "    {\n",
+    "        \"params\": [\n",
+    "            p\n",
+    "            for n, p in model.named_parameters()\n",
+    "            if any(nd in n for nd in no_decay)\n",
+    "        ],\n",
+    "        \"weight_decay\": 0.0,\n",
+    "    },\n",
+    "]\n",
+    "optimizer = AdamW(optimizer_grouped_parameters, lr=2e-5)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "id": "edec41ba-d61f-426d-8e18-ccd2255578ac",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from accelerate import Accelerator\n",
+    "\n",
+    "accelerator = Accelerator()\n",
+    "# Prepare everything with our `accelerator`.\n",
+    "model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(\n",
+    "    model, optimizer, train_dataloader, eval_dataloader\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "id": "c90b2832-9c88-438f-9455-60d19982b290",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from transformers import get_scheduler\n",
+    "\n",
+    "num_train_epochs = 1\n",
+    "num_update_steps_per_epoch = len(train_dataloader)\n",
+    "num_training_steps = num_train_epochs * num_update_steps_per_epoch\n",
+    "\n",
+    "lr_scheduler = get_scheduler(\n",
+    "    name=\"linear\",\n",
+    "    optimizer=optimizer,\n",
+    "    num_warmup_steps=1_000,\n",
+    "    num_training_steps=num_training_steps,\n",
+    ")"
+   ]
+  },
+  {
+   "attachments": {},
+   "cell_type": "markdown",
+   "id": "4d098e82-428d-47f8-a59b-9162015e6696",
+   "metadata": {},
+   "source": [
+    "## Train"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "id": "e50d151b-8070-48e2-b7cf-93bb01249368",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import transformers, torch\n",
+    "from private_transformers import PrivacyEngine\n",
+    "import torch.nn.functional as F\n",
+    "\n",
+    "dp = False\n",
+    "if dp:\n",
+    "    privacy_engine = PrivacyEngine(\n",
+    "            model,\n",
+    "            batch_size=BATCH_SIZE,\n",
+    "            sample_size=50000,\n",
+    "            epochs=num_train_epochs,\n",
+    "            max_grad_norm=0.1,\n",
+    "            target_epsilon=3,\n",
+    "            ghost_clipping=True,\n",
+    "        )\n",
+    "\n",
+    "    privacy_engine.attach(optimizer)\n",
+    "    print(privacy_engine)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "id": "1351e828-2d3e-4870-bc0e-b7e85b6dfe05",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import math \n",
+    "def eval(model, eval_dataloader):\n",
+    "    model.eval()\n",
+    "    losses = []\n",
+    "    for step, batch in enumerate(eval_dataloader):\n",
+    "        with torch.no_grad():\n",
+    "            outputs = model(**batch)\n",
+    "\n",
+    "        loss = outputs.loss\n",
+    "        losses.append(\n",
+    "            accelerator.gather(loss.repeat(BATCH_SIZE))\n",
+    "        )\n",
+    "\n",
+    "    losses = torch.cat(losses)\n",
+    "    losses = losses[: len(eval_dataset)]\n",
+    "    try:\n",
+    "        perplexity = math.exp(torch.mean(losses))\n",
+    "    except OverflowError:\n",
+    "        perplexity = float(\"inf\")\n",
+    "    return perplexity"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 17,
+   "id": "65110d08-1b58-46d9-b3bb-e71cd9d0a5a6",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "model_path = 'dp-gpt2-clm-model.pth'\n",
+    "\n",
+    "def train(model, train_dataloader, optimizer):\n",
+    "    # Only show the progress bar once on each machine.\n",
+    "    progress_bar = tqdm(range(num_training_steps))\n",
+    "    best_val_perplexity = float(\"inf\")\n",
+    "    gradient_accumulation_steps = 1 \n",
+    "    completed_steps = 0\n",
+    "    for epoch in range(num_train_epochs):\n",
+    "        model.train()\n",
+    "        for step, batch in enumerate(train_dataloader):\n",
+    "            outputs = model(**batch)\n",
+    "            loss = outputs.loss\n",
+    "            loss = loss / gradient_accumulation_steps\n",
+    "            # accelerator.backward(loss)\n",
+    "            if (\n",
+    "                step % gradient_accumulation_steps == 0\n",
+    "                or step == len(train_dataloader) - 1\n",
+    "            ):\n",
+    "                optimizer.step()\n",
+    "                lr_scheduler.step()\n",
+    "                optimizer.zero_grad()\n",
+    "                progress_bar.update(1)\n",
+    "                completed_steps += 1\n",
+    "\n",
+    "            if completed_steps >= num_training_steps:\n",
+    "                break\n",
+    "                \n",
+    "        perplexity = eval(model, eval_dataloader)\n",
+    "        print(f\"epoch {epoch+1}|{num_train_epochs}: perplexity: {perplexity}\")\n",
+    "        if perplexity < best_val_perplexity:\n",
+    "            best_val_perplexity = perplexity\n",
+    "            torch.save(model.state_dict(), model_path)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 18,
+   "id": "2570b8b0-0cc8-446c-aa1f-2cdd1285dede",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "db657a55c8c84e2eba2a42ac0345c948",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "  0%|          | 0/1159 [00:00<?, ?it/s]"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "epoch 1|1: perplexity: 58994.52537236614\n"
+     ]
+    }
+   ],
+   "source": [
+    "# if __name__ == \"__main__\":\n",
+    "train(model, train_dataloader, optimizer)"
+   ]
+  },
+  {
+   "attachments": {},
+   "cell_type": "markdown",
+   "id": "2f3186c4",
+   "metadata": {},
+   "source": [
+    "## Inference"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 41,
+   "id": "f1cdc471",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import torch\n",
+    "from transformers import (\n",
+    "    CONFIG_MAPPING,\n",
+    "    MODEL_MAPPING,\n",
+    "    AdamW,\n",
+    "    AutoConfig,\n",
+    "    AutoModelForCausalLM,\n",
+    "    AutoTokenizer,\n",
+    "    default_data_collator\n",
+    ")\n",
+    "from itertools import chain\n",
+    "\n",
+    "# Load the trained model\n",
+    "model_path = 'dp-gpt2-clm-model.pth'\n",
+    "\n",
+    "model_checkpoint = \"distilgpt2\"\n",
+    "config = AutoConfig.from_pretrained(model_checkpoint)\n",
+    "model = AutoModelForCausalLM.from_config(config)\n",
+    "model.load_state_dict(torch.load(model_path))\n",
+    "model = model.eval()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 42,
+   "id": "5db723c7",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Set the device to GPU if available\n",
+    "device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n",
+    "model = model.to(device)\n",
+    "\n",
+    "# Set up the tokenizer\n",
+    "tokenizer = AutoTokenizer.from_pretrained(model_checkpoint, use_fast=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 43,
+   "id": "eaecc233",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "tensor([3666, 4522,  318,  220], device='cuda:0')"
+      ]
+     },
+     "execution_count": 43,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "input_ids = tokenizer.encode('My ID is ', return_tensors='pt').to(device)\n",
+    "input_ids[0]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 49,
+   "id": "6674be6b",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "| Generated 0/20 words\n",
+      "| Generated 10/20 words\n",
+      " impekwdimensionalAcc substitchoolFUNCentral smugglers extramiloaten birthplace tier pops Synd frown sanctioned Bowman centr\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "log_interval = 10\n",
+    "words = 20\n",
+    "temperature = 1\n",
+    "tokens = \"\"\n",
+    "with open('generated.txt', 'w') as output_files:\n",
+    "    with torch.no_grad():  # no tracking history\n",
+    "        for i in range(words):\n",
+    "            \n",
+    "            output = model(input_ids)\n",
+    "            word_weights = output[0].squeeze().div(temperature).exp().cpu()\n",
+    "            word_idx = torch.multinomial(word_weights, 1)[0]\n",
+    "            word_tensor = torch.Tensor([[word_idx]]).long().to(device)\n",
+    "            input = torch.cat([input_ids, word_tensor], 1)\n",
+    "\n",
+    "            word = tokenizer.decode(word_idx)\n",
+    "            tokens = tokens + word + ('\\n' if i % 20 == 19 else '')\n",
+    "            output_files.write(word + ('\\n' if i % 20 == 19 else ''))\n",
+    "\n",
+    "            if i % log_interval == 0:\n",
+    "                print('| Generated {}/{} words'.format(i, words))\n",
+    "        print(tokens)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "1a52b084",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "1b1b7938",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.10"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
