@@ -1,3 +1,4 @@
 *.zip
 /opacus-tutorial/data/
 /Draft101/temp
+/Draft101/*.pth
